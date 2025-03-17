@@ -1,0 +1,166 @@
+# ------------------------------------------------------------------------------
+#
+#    DO NOT MODIFY THIS FILE !!!
+#
+#    Configuration properties should be specified in .env file
+#
+#    Application based on OpenVidu should be specified in
+#    docker-compose.override.yml file
+#
+#    This docker-compose file coordinates all services of OpenVidu CE Platform
+#
+#    This file will be overridden when update OpenVidu Platform
+#
+#    Openvidu Version: 2.31.0
+#
+#    Installation Mode: On Premises
+#
+# ------------------------------------------------------------------------------
+
+version: '3.1'
+
+services:
+
+    openvidu-server:
+        image: openvidu/openvidu-server:2.31.0
+        restart: on-failure
+        network_mode: host
+        entrypoint: ['/usr/local/bin/entrypoint.sh']
+        volumes:
+            - ./coturn:/run/secrets/coturn
+            - /var/run/docker.sock:/var/run/docker.sock
+            - ${OPENVIDU_RECORDING_PATH}:${OPENVIDU_RECORDING_PATH}
+            - ${OPENVIDU_RECORDING_CUSTOM_LAYOUT}:${OPENVIDU_RECORDING_CUSTOM_LAYOUT}
+            - ${OPENVIDU_CDR_PATH}:${OPENVIDU_CDR_PATH}
+        env_file:
+            - .env
+        environment:
+            # For production: Enable SSL for the OpenVidu server API to ensure secure communication.
+            # Set to true and configure the .env file with CERTIFICATE_TYPE=letsencrypt.
+            - SERVER_SSL_ENABLED=false
+            # For production: Change the default port (5443) to 443 if you're handling HTTPS directly here,
+            # or ensure nginx proxy (below) handles HTTPS on 443 and forwards to this port.
+            - SERVER_PORT=5443
+            # For production: Update KMS_URIS if you have multiple Kurento Media Servers for load balancing.
+            # Example: ["ws://kms1:8888/kurento", "ws://kms2:8888/kurento"]
+            - KMS_URIS=["ws://localhost:8888/kurento"]
+            # For production: Ensure COTURN_IP is a public IP or domain, not auto-detected, to avoid NAT issues.
+            - COTURN_IP=${COTURN_IP:-auto-ipv4}
+            # For production: Verify COTURN_PORT aligns with your firewall rules; 3478 is standard for TURN.
+            - COTURN_PORT=${COTURN_PORT:-3478}
+        logging:
+            # For production: Increase max-size for logs (e.g., 500M) to handle higher traffic,
+            # and consider a log rotation strategy to avoid disk space issues.
+            options:
+                max-size: "${DOCKER_LOGS_MAX_SIZE:-100M}"
+
+    kms:
+        image: ${KMS_IMAGE:-kurento/kurento-media-server:7.1.1}
+        restart: always
+        network_mode: host
+        ulimits:
+            core: -1
+        volumes:
+            # For production: Ensure /opt/openvidu/kms-crashes is backed up regularly to analyze crashes.
+            - /opt/openvidu/kms-crashes:/opt/openvidu/kms-crashes
+            # For production: Verify OPENVIDU_RECORDING_PATH points to a high-capacity, backed-up storage.
+            - ${OPENVIDU_RECORDING_PATH}:${OPENVIDU_RECORDING_PATH}
+            # For production: Ensure /opt/openvidu/kurento-logs is monitored and rotated to avoid disk issues.
+            - /opt/openvidu/kurento-logs:/opt/openvidu/kurento-logs
+        environment:
+            # For production: Adjust KMS_MIN_PORT and KMS_MAX_PORT to avoid conflicts with other services.
+            # Ensure these ports are open in your firewall for WebRTC traffic.
+            - KMS_MIN_PORT=40000
+            - KMS_MAX_PORT=57000
+            # For production: Set GST_DEBUG to a higher level (e.g., 3) for debugging media issues if needed.
+            - GST_DEBUG=${KMS_DOCKER_ENV_GST_DEBUG:-}
+            # For production: Increase KURENTO_LOG_FILE_SIZE (e.g., 500) for larger logs in high-traffic scenarios.
+            - KURENTO_LOG_FILE_SIZE=${KMS_DOCKER_ENV_KURENTO_LOG_FILE_SIZE:-100}
+            - KURENTO_LOGS_PATH=/opt/openvidu/kurento-logs
+        logging:
+            # For production: Increase max-size for logs (e.g., 500M) and set up log rotation.
+            options:
+                max-size: "${DOCKER_LOGS_MAX_SIZE:-100M}"
+
+    coturn:
+        image: openvidu/openvidu-coturn:2.31.0
+        restart: on-failure
+        ports:
+            # For production: Ensure COTURN_PORT (3478) is open in your firewall for TCP/UDP.
+            # Consider adding a range of ports (e.g., 3478-3480) for scalability.
+            - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/tcp"
+            - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/udp"
+        env_file:
+            - .env
+        volumes:
+            - ./coturn:/run/secrets/coturn
+        command:
+            - --log-file=stdout
+            # For production: Ensure COTURN_PORT aligns with the ports above and firewall rules.
+            - --listening-port=${COTURN_PORT:-3478}
+            - --fingerprint
+            # For production: Adjust min-port and max-port to a wider range (e.g., 49152-65535) for more connections.
+            # Ensure these ports are open in your firewall.
+            - --min-port=${COTURN_MIN_PORT:-57001}
+            - --max-port=${COTURN_MAX_PORT:-65535}
+            - --realm=openvidu
+            - --verbose
+            - --use-auth-secret
+            # For production: COTURN_SHARED_SECRET_KEY should be securely injected via .env or a secret manager.
+            - --static-auth-secret=$${COTURN_SHARED_SECRET_KEY}
+        logging:
+            # For production: Increase max-size for logs (e.g., 500M) and set up log rotation.
+            options:
+                max-size: "${DOCKER_LOGS_MAX_SIZE:-100M}"
+
+    nginx:
+        image: openvidu/openvidu-proxy:2.31.0
+        restart: always
+        network_mode: host
+        volumes:
+            # For production: Ensure ./certificates is backed up to avoid losing Let's Encrypt certificates.
+            - ./certificates:/etc/letsencrypt
+            # For production: Use ./owncert only if providing a custom certificate; otherwise, rely on Let's Encrypt.
+            - ./owncert:/owncert
+            # For production: Add custom VHosts in ./custom-nginx-vhosts for additional routing (e.g., Angular app).
+            - ./custom-nginx-vhosts:/etc/nginx/vhost.d/
+            # For production: Use ./custom-nginx-locations to add custom locations (e.g., /app for Angular).
+            - ./custom-nginx-locations:/custom-nginx-locations
+            # For production: Ensure OPENVIDU_RECORDING_CUSTOM_LAYOUT is on a backed-up storage.
+            - ${OPENVIDU_RECORDING_CUSTOM_LAYOUT}:/opt/openvidu/custom-layout
+        environment:
+            # For production: Set DOMAIN_OR_PUBLIC_IP to your public domain (e.g., video.example.com).
+            - DOMAIN_OR_PUBLIC_IP=${DOMAIN_OR_PUBLIC_IP}
+            # For production: Set CERTIFICATE_TYPE to letsencrypt for trusted certificates.
+            - CERTIFICATE_TYPE=${CERTIFICATE_TYPE}
+            # For production: Provide a valid email for Let's Encrypt notifications.
+            - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+            # For production: Set PROXY_HTTP_PORT to 80 if redirecting HTTP to HTTPS.
+            - PROXY_HTTP_PORT=${HTTP_PORT:-}
+            # For production: Set PROXY_HTTPS_PORT to 443 for standard HTTPS.
+            - PROXY_HTTPS_PORT=${HTTPS_PORT:-}
+            # For production: Use modern protocols (e.g., TLSv1.2 TLSv1.3) for security.
+            - PROXY_HTTPS_PROTOCOLS=${HTTPS_PROTOCOLS:-}
+            # For production: Use secure ciphers (e.g., ECDHE-RSA-AES256-GCM-SHA384).
+            - PROXY_HTTPS_CIPHERS=${HTTPS_CIPHERS:-}
+            # For production: Enable HSTS for security (e.g., max-age=31536000).
+            - PROXY_HTTPS_HSTS=${HTTPS_HSTS:-}
+            # For production: Restrict access to the dashboard (e.g., IP whitelist or basic auth).
+            - ALLOWED_ACCESS_TO_DASHBOARD=${ALLOWED_ACCESS_TO_DASHBOARD:-}
+            # For production: Restrict access to the REST API (e.g., IP whitelist or API key).
+            - ALLOWED_ACCESS_TO_RESTAPI=${ALLOWED_ACCESS_TO_RESTAPI:-}
+            - PROXY_MODE=CE
+            # For production: Set to false if not serving the Angular app via this proxy (use Caddy/Nginx separately).
+            - WITH_APP=true
+            # For production: Set to false to disable deprecated APIs for better security.
+            - SUPPORT_DEPRECATED_API=${SUPPORT_DEPRECATED_API:-false}
+            # For production: Enable REDIRECT_WWW if using a www subdomain.
+            - REDIRECT_WWW=${REDIRECT_WWW:-false}
+            # For production: Increase WORKER_CONNECTIONS (e.g., 20480) for higher traffic.
+            - WORKER_CONNECTIONS=${WORKER_CONNECTIONS:-10240}
+            # For production: Ensure PUBLIC_IP is your server's public IP, not auto-detected.
+            - PUBLIC_IP=${PROXY_PUBLIC_IP:-auto-ipv4}
+        logging:
+            # For production: Increase max-size for logs (e.g., 500M) and set up log rotation.
+            options:
+                max-size: "${DOCKER_LOGS_MAX_SIZE:-100M}"
